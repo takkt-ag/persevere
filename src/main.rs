@@ -31,6 +31,7 @@ use crate::{
     result::{
         bail,
         AnyhowResultExt,
+        Error,
         Result,
         StdResultExt,
     },
@@ -60,6 +61,7 @@ use tracing::{
     debug,
     error,
     info,
+    warn,
 };
 use tracing_subscriber::prelude::*;
 
@@ -253,37 +255,66 @@ async fn upload(
             part_size
         };
 
-        match upload_part(
-            s3,
-            s3_bucket,
-            s3_key,
-            &upload_id,
-            file_to_upload,
-            offset,
-            part_number,
-            number_of_parts,
-            actual_part_size,
-        )
-        .await
-        {
-            Ok(completed_part) => {
-                completed_parts.push(completed_part);
-                offset += actual_part_size;
+        let mut last_retry_error: Option<Error> = None;
+        for attempt in 1..=3 {
+            match upload_part(
+                s3,
+                s3_bucket,
+                s3_key,
+                &upload_id,
+                file_to_upload,
+                offset,
+                part_number,
+                number_of_parts,
+                actual_part_size,
+            )
+            .await
+            {
+                Ok(completed_part) => {
+                    completed_parts.push(completed_part);
+                    offset += actual_part_size;
+                    last_retry_error = None;
+                    break;
+                }
+                Err(Error::Retryable(err)) => {
+                    warn!(
+                        "Failed to upload part {}, retrying (attempt {}): {}",
+                        part_number, attempt, err,
+                    );
+                    last_retry_error = Some(Error::Retryable(err));
+                    continue;
+                }
+                Err(Error::Unrecoverable(err)) => {
+                    error!(
+                        "Unrecoverable failure during upload of part {}, aborting multipart upload: {}",
+                        part_number,
+                        err,
+                    );
+                    s3.abort_multipart_upload()
+                        .bucket(s3_bucket)
+                        .key(s3_key)
+                        .upload_id(&upload_id)
+                        .send()
+                        .await
+                        .into_retryable()?;
+                    return Err(Error::Unrecoverable(err));
+                }
             }
-            Err(err) => {
-                error!(
-                    "Failed to upload part {}, aborting multipart upload: {}",
-                    part_number, err,
-                );
-                s3.abort_multipart_upload()
-                    .bucket(s3_bucket)
-                    .key(s3_key)
-                    .upload_id(&upload_id)
-                    .send()
-                    .await
-                    .into_retryable()?;
-                return Err(err);
-            }
+        }
+
+        if let Some(error) = last_retry_error {
+            error!(
+                "Failed to upload part {} after 3 attempts, aborting multipart upload: {}",
+                part_number, error,
+            );
+            s3.abort_multipart_upload()
+                .bucket(s3_bucket)
+                .key(s3_key)
+                .upload_id(&upload_id)
+                .send()
+                .await
+                .into_retryable()?;
+            return Err(error);
         }
     }
 
