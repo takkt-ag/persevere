@@ -16,6 +16,7 @@
 
 mod compat;
 mod consts;
+mod de;
 mod result;
 
 use crate::{
@@ -49,6 +50,10 @@ use clap::{
     Args,
     Parser,
 };
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use std::path::{
     Path,
     PathBuf,
@@ -65,11 +70,26 @@ use tracing::{
 };
 use tracing_subscriber::prelude::*;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct State {
+    s3_bucket: String,
+    s3_key: String,
+    file_to_upload: PathBuf,
+    file_size_in_bytes: u64,
+    part_size: u64,
+    upload_id: String,
+    last_successful_part: u64,
+    #[serde(with = "de::completed_parts")]
+    completed_parts: Vec<CompletedPart>,
+}
+
 #[derive(Debug, Parser)]
 #[command(version)]
 enum Cli {
     /// Upload a file to S3.
     Upload(Upload),
+    /// Resume the upload of a file to S3.
+    Resume(Resume),
 }
 
 #[derive(Debug, Args)]
@@ -86,21 +106,180 @@ struct Upload {
     /// Explicit part-size to use.
     #[arg(long)]
     override_part_size: Option<u64>,
+    /// Path to where the state-file will be saved.
+    ///
+    /// The state-file is used to make resumable uploads possible. This file is only written if the
+    /// upload has failed.
+    #[arg(long)]
+    state_file: PathBuf,
 }
 
 impl Upload {
-    async fn run(&self) -> Result<()> {
+    async fn run(mut self) -> Result<()> {
         debug!("Running upload command: {:?}", self);
+
+        self.file_to_upload = self
+            .file_to_upload
+            .canonicalize()
+            .context("Failed to canonicalize file path")
+            .into_unrecoverable()?;
+
+        let file_size_in_bytes = {
+            let file = tokio::fs::File::open(&self.file_to_upload)
+                .await
+                .into_unrecoverable()?;
+            file.metadata().await.into_unrecoverable()?.len()
+        };
+        if file_size_in_bytes < MINIMUM_PART_SIZE {
+            bail!("File is too small for multipart upload, and a regular upload is not yet supported by persevere")
+        } else if file_size_in_bytes > MAXIMUM_OBJECT_SIZE {
+            bail!("File exceeds the maximum object size of S3 and thus can't be uploaded")
+        }
+
+        let part_size = if let Some(override_part_size) = self.override_part_size {
+            if override_part_size < MINIMUM_PART_SIZE {
+                bail!(
+                    "The part size is too small, it must be at least {} bytes",
+                    MINIMUM_PART_SIZE
+                );
+            } else if override_part_size > MAXIMUM_PART_SIZE {
+                bail!(
+                    "The part size is too large, it must be at most {} bytes",
+                    MAXIMUM_PART_SIZE
+                );
+            }
+            if file_size_in_bytes.div_ceil(override_part_size) > MAXIMUM_PART_NUMBER {
+                bail!("The number of parts exceeds the maximum number of parts allowed by S3");
+            }
+            override_part_size
+        } else {
+            // The size of the parts we want to upload must at least be `MINIMUM_PART_SIZE`, but if the
+            // file is so large that this part-size would result in more than `MAXIMUM_NUMBER_OF_PARTS`, we
+            // need to adjust the part size to ensure we don't exceed this limit.
+            let part_size =
+                MINIMUM_PART_SIZE.max(file_size_in_bytes.div_ceil(MAXIMUM_NUMBER_OF_PARTS));
+            if part_size > MAXIMUM_PART_SIZE {
+                bail!("The part size exceeds the maximum part size allowed by S3");
+            }
+            part_size
+        };
+
         let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
         let s3 = aws_sdk_s3::Client::new(&config);
-        upload(
-            &s3,
-            &self.s3_bucket,
-            &self.s3_key,
-            &self.file_to_upload,
-            &self.override_part_size,
-        )
-        .await?;
+
+        let multipart_upload = s3
+            .create_multipart_upload()
+            .bucket(&self.s3_bucket)
+            .key(&self.s3_key)
+            .send()
+            .await
+            .into_retryable()?;
+        let upload_id = multipart_upload
+            .upload_id
+            .context("Creating multipart upload probably failed, because no upload ID was returned")
+            .into_retryable()?;
+        info!(
+            "Created multipart upload with ID {} for: s3://{}/{}",
+            upload_id, self.s3_bucket, self.s3_key,
+        );
+
+        let state = State {
+            s3_bucket: self.s3_bucket,
+            s3_key: self.s3_key,
+            file_to_upload: self.file_to_upload,
+            file_size_in_bytes,
+            part_size,
+            upload_id,
+            last_successful_part: 0,
+            completed_parts: vec![],
+        };
+
+        match upload(&s3, &self.state_file, state.clone()).await {
+            Err(Error::Unrecoverable(err)) => {
+                error!(
+                    "Unrecoverable failure during upload, aborting multipart upload: {}",
+                    err,
+                );
+                s3.abort_multipart_upload()
+                    .bucket(&state.s3_bucket)
+                    .key(&state.s3_key)
+                    .upload_id(&state.upload_id)
+                    .send()
+                    .await
+                    .into_retryable()?;
+                return Err(Error::Unrecoverable(err));
+            }
+            result => result,
+        }?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+struct Resume {
+    /// Path to where the state-file of a previous upload.
+    ///
+    /// This state-file is used to resume the upload in question.
+    #[arg(long)]
+    state_file: PathBuf,
+}
+
+impl Resume {
+    async fn run(&self) -> Result<()> {
+        debug!("Running resume command: {:?}", self);
+
+        // Serde does not support asynchronous readers, so we make sure to spawn the task away from
+        // the main thread.
+        let state: State = tokio::spawn({
+            let state_file = self.state_file.clone();
+            async {
+                serde_json::from_reader(
+                    std::fs::File::open(state_file)
+                        .context("Failed to open state file")
+                        .into_unrecoverable()?,
+                )
+                .context("Failed to deserialize state file")
+                .into_unrecoverable()
+            }
+        })
+        .await
+        .expect("Failed to await synchronous read of state file")?;
+
+        let current_file_size_in_bytes = {
+            let file = tokio::fs::File::open(&state.file_to_upload)
+                .await
+                .into_unrecoverable()?;
+            file.metadata().await.into_unrecoverable()?.len()
+        };
+        if current_file_size_in_bytes != state.file_size_in_bytes {
+            bail!(
+                "The file has changed since the last upload. The file size was {} bytes, but is now {} bytes. The upload cannot be resumed, and should be aborted! Upload ID: {}",
+                state.file_size_in_bytes,
+                current_file_size_in_bytes,
+                state.upload_id,
+            );
+        }
+
+        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let s3 = aws_sdk_s3::Client::new(&config);
+
+        match upload(&s3, &self.state_file, state.clone()).await {
+            Err(Error::Unrecoverable(err)) => {
+                error!(
+                    "Unrecoverable failure during upload, aborting multipart upload: {}",
+                    err,
+                );
+                s3.abort_multipart_upload()
+                    .bucket(&state.s3_bucket)
+                    .key(&state.s3_key)
+                    .upload_id(&state.upload_id)
+                    .send()
+                    .await
+                    .into_retryable()?;
+                return Err(Error::Unrecoverable(err));
+            }
+            result => result,
+        }?;
         Ok(())
     }
 }
@@ -162,107 +341,47 @@ async fn upload_part(
 }
 
 #[tracing::instrument(skip_all)]
-async fn upload(
-    s3: &aws_sdk_s3::Client,
-    s3_bucket: &str,
-    s3_key: &str,
-    file_to_upload: &Path,
-    override_part_size: &Option<u64>,
-) -> Result<()> {
-    let file_size_in_bytes = {
-        let file = tokio::fs::File::open(file_to_upload)
-            .await
-            .into_unrecoverable()?;
-        file.metadata().await.into_unrecoverable()?.len()
-    };
-    if file_size_in_bytes < MINIMUM_PART_SIZE {
-        bail!("File is too small for multipart upload, and a regular upload is not yet supported by persevere")
-    } else if file_size_in_bytes > MAXIMUM_OBJECT_SIZE {
-        bail!("File exceeds the maximum object size of S3 and thus can't be uploaded")
-    }
-
-    let part_size = if let Some(override_part_size) = override_part_size {
-        if *override_part_size < MINIMUM_PART_SIZE {
-            bail!(
-                "The part size is too small, it must be at least {} bytes",
-                MINIMUM_PART_SIZE
-            );
-        } else if *override_part_size > MAXIMUM_PART_SIZE {
-            bail!(
-                "The part size is too large, it must be at most {} bytes",
-                MAXIMUM_PART_SIZE
-            );
-        }
-        if file_size_in_bytes.div_ceil(*override_part_size) > MAXIMUM_PART_NUMBER {
-            bail!("The number of parts exceeds the maximum number of parts allowed by S3");
-        }
-        *override_part_size
-    } else {
-        // The size of the parts we want to upload must at least be `MINIMUM_PART_SIZE`, but if the
-        // file is so large that this part-size would result in more than `MAXIMUM_NUMBER_OF_PARTS`, we
-        // need to adjust the part size to ensure we don't exceed this limit.
-        let part_size = MINIMUM_PART_SIZE.max(file_size_in_bytes.div_ceil(MAXIMUM_NUMBER_OF_PARTS));
-        if part_size > MAXIMUM_PART_SIZE {
-            bail!("The part size exceeds the maximum part size allowed by S3");
-        }
-        part_size
-    };
-
-    let number_of_parts = file_size_in_bytes.div_ceil(part_size);
+async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) -> Result<()> {
+    let number_of_parts = state.file_size_in_bytes.div_ceil(state.part_size);
     debug!(
         "File size: {} bytes. Part size: {} bytes. Number of parts to upload: {}.",
-        file_size_in_bytes, part_size, number_of_parts,
+        state.file_size_in_bytes, state.part_size, number_of_parts,
     );
     if number_of_parts > MAXIMUM_PART_NUMBER {
         bail!("The number of parts exceeds the maximum number of parts allowed by S3");
     }
 
-    let multipart_upload = s3
-        .create_multipart_upload()
-        .bucket(s3_bucket)
-        .key(s3_key)
-        .send()
-        .await
-        .into_retryable()?;
-    let upload_id = multipart_upload
-        .upload_id
-        .context("Creating multipart upload probably failed, because no upload ID was returned")
-        .into_retryable()?;
-    info!(
-        "Created multipart upload with ID {} for: s3://{}/{}",
-        upload_id, s3_bucket, s3_key,
-    );
-
     info!(
         "Uploading the file in {} parts of {} bytes each",
-        number_of_parts, part_size,
+        number_of_parts, state.part_size,
     );
-    let mut completed_parts: Vec<CompletedPart> = Vec::with_capacity(number_of_parts as usize);
-    let mut offset = 0;
-    for part_number in MINIMUM_PART_NUMBER..(MINIMUM_PART_NUMBER + number_of_parts) {
+
+    let first_part_number = if state.last_successful_part > 0 {
+        state.last_successful_part + 1
+    } else {
+        MINIMUM_PART_NUMBER
+    };
+    let mut offset = (first_part_number - 1) * state.part_size;
+    for part_number in first_part_number..(MINIMUM_PART_NUMBER + number_of_parts) {
         let actual_part_size = if part_number == number_of_parts {
-            info!(
-                "Last part is smaller than the rest: {} bytes",
-                file_size_in_bytes % part_size
-            );
-            let potential_part_size = file_size_in_bytes % part_size;
+            let potential_part_size = state.file_size_in_bytes % state.part_size;
             if potential_part_size == 0 {
-                part_size
+                state.part_size
             } else {
                 potential_part_size
             }
         } else {
-            part_size
+            state.part_size
         };
 
         let mut last_retry_error: Option<Error> = None;
         for attempt in 1..=3 {
             match upload_part(
                 s3,
-                s3_bucket,
-                s3_key,
-                &upload_id,
-                file_to_upload,
+                &state.s3_bucket,
+                &state.s3_key,
+                &state.upload_id,
+                &state.file_to_upload,
                 offset,
                 part_number,
                 number_of_parts,
@@ -271,9 +390,10 @@ async fn upload(
             .await
             {
                 Ok(completed_part) => {
-                    completed_parts.push(completed_part);
+                    state.completed_parts.push(completed_part);
                     offset += actual_part_size;
                     last_retry_error = None;
+                    state.last_successful_part = part_number;
                     break;
                 }
                 Err(Error::Retryable(err)) => {
@@ -284,53 +404,53 @@ async fn upload(
                     last_retry_error = Some(Error::Retryable(err));
                     continue;
                 }
-                Err(Error::Unrecoverable(err)) => {
-                    error!(
-                        "Unrecoverable failure during upload of part {}, aborting multipart upload: {}",
-                        part_number,
-                        err,
-                    );
-                    s3.abort_multipart_upload()
-                        .bucket(s3_bucket)
-                        .key(s3_key)
-                        .upload_id(&upload_id)
-                        .send()
-                        .await
-                        .into_retryable()?;
-                    return Err(Error::Unrecoverable(err));
+                Err(err) => {
+                    return Err(err);
                 }
             }
         }
 
         if let Some(error) = last_retry_error {
+            // Serde does not support asynchronous writeers, so we make sure to spawn the task away
+            // from the main thread.
+            tokio::spawn({
+                let state_file = state_file.to_owned();
+                async move {
+                    serde_json::to_writer(
+                        std::fs::File::create(state_file)
+                            .context("Failed to open state file")
+                            .into_unrecoverable()?,
+                        &state,
+                    )
+                    .context("Failed to serialize state file")
+                    .into_unrecoverable()
+                }
+            })
+            .await
+            .expect("Failed to await synchronous write of state file")?;
             error!(
-                "Failed to upload part {} after 3 attempts, aborting multipart upload: {}",
-                part_number, error,
+                "Failed to upload part {} after 3 attempts. Multipart upload will not be aborted, to allow resuming.",
+                part_number,
             );
-            s3.abort_multipart_upload()
-                .bucket(s3_bucket)
-                .key(s3_key)
-                .upload_id(&upload_id)
-                .send()
-                .await
-                .into_retryable()?;
+            error!("Process failed with a retryable error. To resume the upload, run the following command:");
+            error!("persevere resume --state-file '{}'", state_file.display());
             return Err(error);
         }
     }
 
     // We verify that the offset we reached matches up with the file size.
-    if offset != file_size_in_bytes {
+    if offset != state.file_size_in_bytes {
         bail!("In theory we finished the upload, but in practice there were still more bytes to be read from the file. This is unexpected, and we don't really have a way to recover from this, besides maybe trying to reupload the file.");
     }
 
     let completed_multipart_upload = s3
         .complete_multipart_upload()
-        .bucket(s3_bucket)
-        .key(s3_key)
-        .upload_id(&upload_id)
+        .bucket(state.s3_bucket)
+        .key(state.s3_key)
+        .upload_id(&state.upload_id)
         .multipart_upload(
             CompletedMultipartUpload::builder()
-                .set_parts(Some(completed_parts))
+                .set_parts(Some(state.completed_parts))
                 .build(),
         )
         .send()
@@ -368,5 +488,6 @@ async fn main() -> Result<()> {
     let command = Cli::parse();
     match command {
         Cli::Upload(cmd) => cmd.run().await,
+        Cli::Resume(cmd) => cmd.run().await,
     }
 }
