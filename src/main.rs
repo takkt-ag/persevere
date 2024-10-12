@@ -16,6 +16,7 @@
 
 mod compat;
 mod consts;
+mod result;
 
 use crate::{
     compat::ByteStreamExt,
@@ -27,11 +28,14 @@ use crate::{
         MINIMUM_PART_NUMBER,
         MINIMUM_PART_SIZE,
     },
+    result::{
+        bail,
+        AnyhowResultExt,
+        Result,
+        StdResultExt,
+    },
 };
-use anyhow::{
-    Context,
-    Result,
-};
+use anyhow::Context;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
     primitives::ByteStream,
@@ -124,7 +128,8 @@ async fn upload_part(
         .content_length(part_size as i64)
         .body(byte_stream)
         .send()
-        .await?;
+        .await
+        .into_retryable()?;
 
     info!(
         "Finished upload of part {} of {} ({} bytes)",
@@ -149,29 +154,31 @@ async fn upload(
     file_to_upload: &Path,
     override_part_size: &Option<u64>,
 ) -> Result<()> {
-    let mut file = tokio::fs::File::open(file_to_upload).await?;
+    let mut file = tokio::fs::File::open(file_to_upload)
+        .await
+        .into_unrecoverable()?;
 
-    let file_size_in_bytes = file.metadata().await?.len();
+    let file_size_in_bytes = file.metadata().await.into_unrecoverable()?.len();
     if file_size_in_bytes < MINIMUM_PART_SIZE {
-        anyhow::bail!("File is too small for multipart upload, and a regular upload is not yet supported by persevere")
+        bail!("File is too small for multipart upload, and a regular upload is not yet supported by persevere")
     } else if file_size_in_bytes > MAXIMUM_OBJECT_SIZE {
-        anyhow::bail!("File exceeds the maximum object size of S3 and thus can't be uploaded")
+        bail!("File exceeds the maximum object size of S3 and thus can't be uploaded")
     }
 
     let part_size = if let Some(override_part_size) = override_part_size {
         if *override_part_size < MINIMUM_PART_SIZE {
-            anyhow::bail!(
+            bail!(
                 "The part size is too small, it must be at least {} bytes",
                 MINIMUM_PART_SIZE
             );
         } else if *override_part_size > MAXIMUM_PART_SIZE {
-            anyhow::bail!(
+            bail!(
                 "The part size is too large, it must be at most {} bytes",
                 MAXIMUM_PART_SIZE
             );
         }
         if file_size_in_bytes.div_ceil(*override_part_size) > MAXIMUM_PART_NUMBER {
-            anyhow::bail!("The number of parts exceeds the maximum number of parts allowed by S3");
+            bail!("The number of parts exceeds the maximum number of parts allowed by S3");
         }
         *override_part_size
     } else {
@@ -180,7 +187,7 @@ async fn upload(
         // need to adjust the part size to ensure we don't exceed this limit.
         let part_size = MINIMUM_PART_SIZE.max(file_size_in_bytes.div_ceil(MAXIMUM_NUMBER_OF_PARTS));
         if part_size > MAXIMUM_PART_SIZE {
-            anyhow::bail!("The part size exceeds the maximum part size allowed by S3");
+            bail!("The part size exceeds the maximum part size allowed by S3");
         }
         part_size
     };
@@ -191,7 +198,7 @@ async fn upload(
         file_size_in_bytes, part_size, number_of_parts,
     );
     if number_of_parts > MAXIMUM_PART_NUMBER {
-        anyhow::bail!("The number of parts exceeds the maximum number of parts allowed by S3");
+        bail!("The number of parts exceeds the maximum number of parts allowed by S3");
     }
 
     let multipart_upload = s3
@@ -199,10 +206,12 @@ async fn upload(
         .bucket(s3_bucket)
         .key(s3_key)
         .send()
-        .await?;
+        .await
+        .into_retryable()?;
     let upload_id = multipart_upload
         .upload_id
-        .context("Creating multipart upload probably failed, because no upload ID was returned")?;
+        .context("Creating multipart upload probably failed, because no upload ID was returned")
+        .into_retryable()?;
     info!(
         "Created multipart upload with ID {} for: s3://{}/{}",
         upload_id, s3_bucket, s3_key,
@@ -234,7 +243,7 @@ async fn upload(
             s3_bucket,
             s3_key,
             &upload_id,
-            file.try_clone().await?,
+            file.try_clone().await.into_retryable()?,
             part_number,
             number_of_parts,
             actual_part_size,
@@ -254,19 +263,20 @@ async fn upload(
                     .key(s3_key)
                     .upload_id(&upload_id)
                     .send()
-                    .await?;
-                return Err(err).context("Part upload failed, aborted multipart upload");
+                    .await
+                    .into_retryable()?;
+                return Err(err);
             }
         }
     }
 
     // We assert that the file was read until the end by trying to read one more byte. If the number
     // of bytes read is 0, we know we've reached the end of the file, matching our assumption.
-    let bytes_read = file.read(&mut [0; 1]).await?;
+    let bytes_read = file.read(&mut [0; 1]).await.into_retryable()?;
     if bytes_read != 0 {
         // FIXME: return a "unrecoverable" error type to ensure the multipart upload is aborted,
         //        because this state should never occur and is not recoverable.
-        anyhow::bail!("In theory we finished the upload, but in practice there were still more bytes to be read from the file. This is unexpected, and we don't really have a way to recover from this, besides maybe trying to reupload the file.");
+        bail!("In theory we finished the upload, but in practice there were still more bytes to be read from the file. This is unexpected, and we don't really have a way to recover from this, besides maybe trying to reupload the file.");
     }
 
     let completed_multipart_upload = s3
@@ -280,7 +290,8 @@ async fn upload(
                 .build(),
         )
         .send()
-        .await?;
+        .await
+        .into_retryable()?;
     info!(
         "Successfully uploaded the file. ETag: {}",
         completed_multipart_upload
