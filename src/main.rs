@@ -52,7 +52,10 @@ use std::path::{
     Path,
     PathBuf,
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::{
+    AsyncReadExt,
+    AsyncSeekExt,
+};
 use tracing::{
     debug,
     error,
@@ -107,7 +110,8 @@ async fn upload_part(
     s3_bucket: &str,
     s3_key: &str,
     upload_id: &str,
-    file: tokio::fs::File,
+    file_to_upload: &Path,
+    offset: u64,
     part_number: u64,
     number_of_parts: u64,
     part_size: u64,
@@ -116,6 +120,15 @@ async fn upload_part(
         "Starting upload of part {} of {} ({} bytes)...",
         part_number, number_of_parts, part_size,
     );
+    debug!("Opening file for reading: {}", file_to_upload.display());
+    let mut file = tokio::fs::File::open(file_to_upload)
+        .await
+        .into_unrecoverable()?;
+    debug!("Seeking to the start of the part: {}", offset);
+    file.seek(tokio::io::SeekFrom::Start(offset))
+        .await
+        .into_unrecoverable()?;
+
     let part_reader = file.take(part_size);
     let byte_stream = ByteStream::from_reader(part_reader);
 
@@ -154,11 +167,12 @@ async fn upload(
     file_to_upload: &Path,
     override_part_size: &Option<u64>,
 ) -> Result<()> {
-    let mut file = tokio::fs::File::open(file_to_upload)
-        .await
-        .into_unrecoverable()?;
-
-    let file_size_in_bytes = file.metadata().await.into_unrecoverable()?.len();
+    let file_size_in_bytes = {
+        let file = tokio::fs::File::open(file_to_upload)
+            .await
+            .into_unrecoverable()?;
+        file.metadata().await.into_unrecoverable()?.len()
+    };
     if file_size_in_bytes < MINIMUM_PART_SIZE {
         bail!("File is too small for multipart upload, and a regular upload is not yet supported by persevere")
     } else if file_size_in_bytes > MAXIMUM_OBJECT_SIZE {
@@ -222,6 +236,7 @@ async fn upload(
         number_of_parts, part_size,
     );
     let mut completed_parts: Vec<CompletedPart> = Vec::with_capacity(number_of_parts as usize);
+    let mut offset = 0;
     for part_number in MINIMUM_PART_NUMBER..(MINIMUM_PART_NUMBER + number_of_parts) {
         let actual_part_size = if part_number == number_of_parts {
             info!(
@@ -243,7 +258,8 @@ async fn upload(
             s3_bucket,
             s3_key,
             &upload_id,
-            file.try_clone().await.into_retryable()?,
+            file_to_upload,
+            offset,
             part_number,
             number_of_parts,
             actual_part_size,
@@ -252,6 +268,7 @@ async fn upload(
         {
             Ok(completed_part) => {
                 completed_parts.push(completed_part);
+                offset += actual_part_size;
             }
             Err(err) => {
                 error!(
@@ -270,12 +287,8 @@ async fn upload(
         }
     }
 
-    // We assert that the file was read until the end by trying to read one more byte. If the number
-    // of bytes read is 0, we know we've reached the end of the file, matching our assumption.
-    let bytes_read = file.read(&mut [0; 1]).await.into_retryable()?;
-    if bytes_read != 0 {
-        // FIXME: return a "unrecoverable" error type to ensure the multipart upload is aborted,
-        //        because this state should never occur and is not recoverable.
+    // We verify that the offset we reached matches up with the file size.
+    if offset != file_size_in_bytes {
         bail!("In theory we finished the upload, but in practice there were still more bytes to be read from the file. This is unexpected, and we don't really have a way to recover from this, besides maybe trying to reupload the file.");
     }
 
