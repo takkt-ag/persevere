@@ -97,6 +97,7 @@ impl Upload {
 }
 
 #[tracing::instrument(skip_all)]
+#[allow(clippy::too_many_arguments)] // FIXME: refactor to reduce number of arguments
 async fn upload_part(
     s3: &aws_sdk_s3::Client,
     s3_bucket: &str,
