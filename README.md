@@ -2,7 +2,6 @@
 
 > [!CAUTION]
 > This project is in a very early development stage and not yet expected to be ready for production use.
-> Some of the core features, actually reliably uploading files and resuming uploads, are not yet implemented.
 
 ## License
 
