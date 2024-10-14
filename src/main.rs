@@ -533,8 +533,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::fmt::layer()
                 .compact()
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-                .with_file(true)
-                .with_line_number(true)
+                .with_file(false)
+                .with_line_number(false)
                 .with_target(false),
         )
         .with(
