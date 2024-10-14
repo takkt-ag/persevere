@@ -477,8 +477,8 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
             }
         }
 
+        state.write_to_file(&state_file).await?;
         if let Some(error) = last_retry_error {
-            state.write_to_file(&state_file).await?;
             error!(
                 "Failed to upload part {} after 3 attempts. Multipart upload will not be aborted, to allow resuming.",
                 part_number,
