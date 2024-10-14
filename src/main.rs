@@ -84,6 +84,25 @@ struct State {
     completed_parts: Vec<CompletedPart>,
 }
 
+impl State {
+    async fn write_to_file(&self, file: impl AsRef<Path>) -> Result<()> {
+        let file = file.as_ref().to_owned();
+
+        // serde_json does not support asynchronous writers, so we make sure to spawn the task such
+        // that it doesn't block the executor.
+        tokio::task::block_in_place(|| {
+            serde_json::to_writer(
+                std::fs::File::create(file)
+                    .context("Failed to open state file")
+                    .into_unrecoverable()?,
+                self,
+            )
+            .context("Failed to serialize state file")
+            .into_unrecoverable()
+        })
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(version)]
 enum Cli {
@@ -118,6 +137,14 @@ struct Upload {
 impl Upload {
     async fn run(mut self) -> Result<()> {
         debug!("Running upload command: {:?}", self);
+
+        debug!("Verifying that the state-file doesn't exist yet. If it does, we don't allow the start of a new upload against the same file.");
+        if tokio::fs::try_exists(&self.state_file)
+            .await
+            .into_unrecoverable()?
+        {
+            bail!("The state-file already exists, and we don't allow starting a new upload against the same file. If you want to resume the upload, use the 'resume' command instead. If you want to start a new upload, please remove the state-file first, or use a different one.");
+        }
 
         self.file_to_upload = self
             .file_to_upload
@@ -221,7 +248,8 @@ impl Upload {
 struct Resume {
     /// Path to where the state-file of a previous upload.
     ///
-    /// This state-file is used to resume the upload in question.
+    /// This state-file is used to resume the upload in question. The state-file will automatically
+    /// be removed if the upload finishes successfully.
     #[arg(long)]
     state_file: PathBuf,
 }
@@ -404,23 +432,7 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
         }
 
         if let Some(error) = last_retry_error {
-            // Serde does not support asynchronous writeers, so we make sure to spawn the task away
-            // from the main thread.
-            tokio::spawn({
-                let state_file = state_file.to_owned();
-                async move {
-                    serde_json::to_writer(
-                        std::fs::File::create(state_file)
-                            .context("Failed to open state file")
-                            .into_unrecoverable()?,
-                        &state,
-                    )
-                    .context("Failed to serialize state file")
-                    .into_unrecoverable()
-                }
-            })
-            .await
-            .expect("Failed to await synchronous write of state file")?;
+            state.write_to_file(&state_file).await?;
             error!(
                 "Failed to upload part {} after 3 attempts. Multipart upload will not be aborted, to allow resuming.",
                 part_number,
@@ -456,6 +468,14 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
             .as_deref()
             .unwrap_or("<unknown>"),
     );
+
+    debug!("Removing state-file: {}", state_file.display());
+    match tokio::fs::remove_file(state_file).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            debug!("The state-file did not exist, probably because it was never written, likely because the upload worked first try.")
+        }
+        result => result.into_unrecoverable()?,
+    }
 
     Ok(())
 }
