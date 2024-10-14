@@ -260,9 +260,9 @@ impl Resume {
 
         // Serde does not support asynchronous readers, so we make sure to spawn the task away from
         // the main thread.
-        let state: State = tokio::spawn({
+        let state: State = tokio::task::spawn_blocking({
             let state_file = self.state_file.clone();
-            async {
+            || {
                 serde_json::from_reader(
                     std::fs::File::open(state_file)
                         .context("Failed to open state file")
