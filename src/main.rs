@@ -77,6 +77,7 @@ struct State {
     file_to_upload: PathBuf,
     file_size_in_bytes: u64,
     part_size: u64,
+    number_of_parts: u64,
     upload_id: String,
     last_successful_part: u64,
     #[serde(with = "de::completed_parts")]
@@ -189,6 +190,7 @@ impl Upload {
             file_to_upload: self.file_to_upload,
             file_size_in_bytes,
             part_size,
+            number_of_parts: file_size_in_bytes.div_ceil(part_size),
             upload_id,
             last_successful_part: 0,
             completed_parts: vec![],
@@ -284,42 +286,41 @@ impl Resume {
     }
 }
 
-#[tracing::instrument(skip_all)]
-#[allow(clippy::too_many_arguments)] // FIXME: refactor to reduce number of arguments
-async fn upload_part(
-    s3: &aws_sdk_s3::Client,
-    s3_bucket: &str,
-    s3_key: &str,
-    upload_id: &str,
-    file_to_upload: &Path,
+#[derive(Clone, Debug)]
+struct Part {
+    number: i32,
     offset: u64,
-    part_number: u64,
-    number_of_parts: u64,
-    part_size: u64,
-) -> Result<CompletedPart> {
+    size: u64,
+}
+
+#[tracing::instrument(skip_all)]
+async fn upload_part(s3: &aws_sdk_s3::Client, state: &State, part: Part) -> Result<CompletedPart> {
     info!(
         "Starting upload of part {} of {} ({} bytes)...",
-        part_number, number_of_parts, part_size,
+        part.number, state.number_of_parts, part.size,
     );
-    debug!("Opening file for reading: {}", file_to_upload.display());
-    let mut file = tokio::fs::File::open(file_to_upload)
+    debug!(
+        "Opening file for reading: {}",
+        state.file_to_upload.display()
+    );
+    let mut file = tokio::fs::File::open(&state.file_to_upload)
         .await
         .into_unrecoverable()?;
-    debug!("Seeking to the start of the part: {}", offset);
-    file.seek(tokio::io::SeekFrom::Start(offset))
+    debug!("Seeking to the start of the part: {}", part.offset);
+    file.seek(tokio::io::SeekFrom::Start(part.offset))
         .await
         .into_unrecoverable()?;
 
-    let part_reader = file.take(part_size);
+    let part_reader = file.take(part.size);
     let byte_stream = ByteStream::from_reader(part_reader);
 
     let uploaded_part = s3
         .upload_part()
-        .bucket(s3_bucket)
-        .key(s3_key)
-        .upload_id(upload_id)
-        .part_number(part_number as i32)
-        .content_length(part_size as i64)
+        .bucket(&state.s3_bucket)
+        .key(&state.s3_key)
+        .upload_id(&state.upload_id)
+        .part_number(part.number)
+        .content_length(part.size as i64)
         .body(byte_stream)
         .send()
         .await
@@ -327,7 +328,7 @@ async fn upload_part(
 
     info!(
         "Finished upload of part {} of {} ({} bytes)",
-        part_number, number_of_parts, part_size,
+        part.number, state.number_of_parts, part.size,
     );
 
     Ok(CompletedPart::builder()
@@ -336,24 +337,23 @@ async fn upload_part(
         .set_checksum_sha1(uploaded_part.checksum_sha1)
         .set_checksum_sha256(uploaded_part.checksum_sha256)
         .set_e_tag(uploaded_part.e_tag)
-        .part_number(part_number as i32)
+        .part_number(part.number)
         .build())
 }
 
 #[tracing::instrument(skip_all)]
 async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) -> Result<()> {
-    let number_of_parts = state.file_size_in_bytes.div_ceil(state.part_size);
     debug!(
         "File size: {} bytes. Part size: {} bytes. Number of parts to upload: {}.",
-        state.file_size_in_bytes, state.part_size, number_of_parts,
+        state.file_size_in_bytes, state.part_size, state.number_of_parts,
     );
-    if number_of_parts > MAXIMUM_PART_NUMBER {
+    if state.number_of_parts > MAXIMUM_PART_NUMBER {
         bail!("The number of parts exceeds the maximum number of parts allowed by S3");
     }
 
     info!(
         "Uploading the file in {} parts of {} bytes each",
-        number_of_parts, state.part_size,
+        state.number_of_parts, state.part_size,
     );
 
     let first_part_number = if state.last_successful_part > 0 {
@@ -362,8 +362,8 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
         MINIMUM_PART_NUMBER
     };
     let mut offset = (first_part_number - 1) * state.part_size;
-    for part_number in first_part_number..(MINIMUM_PART_NUMBER + number_of_parts) {
-        let actual_part_size = if part_number == number_of_parts {
+    for part_number in first_part_number..(MINIMUM_PART_NUMBER + state.number_of_parts) {
+        let actual_part_size = if part_number == state.number_of_parts {
             let potential_part_size = state.file_size_in_bytes % state.part_size;
             if potential_part_size == 0 {
                 state.part_size
@@ -376,19 +376,12 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
 
         let mut last_retry_error: Option<Error> = None;
         for attempt in 1..=3 {
-            match upload_part(
-                s3,
-                &state.s3_bucket,
-                &state.s3_key,
-                &state.upload_id,
-                &state.file_to_upload,
+            let part = Part {
+                number: part_number as i32,
                 offset,
-                part_number,
-                number_of_parts,
-                actual_part_size,
-            )
-            .await
-            {
+                size: actual_part_size,
+            };
+            match upload_part(s3, &state, part).await {
                 Ok(completed_part) => {
                     state.completed_parts.push(completed_part);
                     offset += actual_part_size;
