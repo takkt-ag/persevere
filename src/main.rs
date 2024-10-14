@@ -70,7 +70,7 @@ use tracing::{
 };
 use tracing_subscriber::prelude::*;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct State {
     s3_bucket: String,
     s3_key: String,
@@ -103,7 +103,10 @@ impl State {
         .expect("Failed to await synchronous read of state file")
     }
 
-    async fn write_to_file(&self, file: impl AsRef<Path>) -> Result<()> {
+    // NOTE: `self` is taken mutably here, even though it isn't required by the method itself. By
+    //       requiring mutability, we guarantee that there is only ever one task that can write the
+    //       state file at a time, ensuring the file is always in a consistent state that.
+    async fn write_to_file(&mut self, file: impl AsRef<Path>) -> Result<()> {
         let file = file.as_ref().to_owned();
 
         // serde_json does not support asynchronous writers, so we make sure to spawn the task such
@@ -231,7 +234,7 @@ impl Upload {
             upload_id, self.s3_bucket, self.s3_key,
         );
 
-        let state = State {
+        let mut state = State {
             s3_bucket: self.s3_bucket,
             s3_key: self.s3_key,
             file_to_upload: self.file_to_upload,
@@ -243,7 +246,7 @@ impl Upload {
             completed_parts: vec![],
         };
 
-        match upload(&s3, &self.state_file, state.clone()).await {
+        match upload(&s3, &self.state_file, &mut state).await {
             Err(Error::Unrecoverable(err)) => {
                 error!(
                     "Unrecoverable failure during upload, aborting multipart upload: {}",
@@ -278,7 +281,7 @@ impl Resume {
     async fn run(&self) -> Result<()> {
         debug!("Running resume command: {:?}", self);
 
-        let state = State::from_file(&self.state_file).await?;
+        let mut state = State::from_file(&self.state_file).await?;
         let current_file_size_in_bytes = {
             let file = tokio::fs::File::open(&state.file_to_upload)
                 .await
@@ -297,7 +300,7 @@ impl Resume {
         let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
         let s3 = aws_sdk_s3::Client::new(&config);
 
-        match upload(&s3, &self.state_file, state.clone()).await {
+        match upload(&s3, &self.state_file, &mut state).await {
             Err(Error::Unrecoverable(err)) => {
                 error!(
                     "Unrecoverable failure during upload, aborting multipart upload: {}",
@@ -416,7 +419,7 @@ async fn upload_part(s3: &aws_sdk_s3::Client, state: &State, part: Part) -> Resu
 }
 
 #[tracing::instrument(skip_all)]
-async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) -> Result<()> {
+async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, state: &mut State) -> Result<()> {
     debug!(
         "File size: {} bytes. Part size: {} bytes. Number of parts to upload: {}.",
         state.file_size_in_bytes, state.part_size, state.number_of_parts,
@@ -455,7 +458,7 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
                 offset,
                 size: actual_part_size,
             };
-            match upload_part(s3, &state, part).await {
+            match upload_part(s3, state, part).await {
                 Ok(completed_part) => {
                     state.completed_parts.push(completed_part);
                     offset += actual_part_size;
@@ -496,12 +499,12 @@ async fn upload(s3: &aws_sdk_s3::Client, state_file: &Path, mut state: State) ->
 
     let completed_multipart_upload = s3
         .complete_multipart_upload()
-        .bucket(state.s3_bucket)
-        .key(state.s3_key)
+        .bucket(&state.s3_bucket)
+        .key(&state.s3_key)
         .upload_id(&state.upload_id)
         .multipart_upload(
             CompletedMultipartUpload::builder()
-                .set_parts(Some(state.completed_parts))
+                .set_parts(Some(state.completed_parts.clone()))
                 .build(),
         )
         .send()
