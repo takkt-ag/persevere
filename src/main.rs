@@ -85,6 +85,24 @@ struct State {
 }
 
 impl State {
+    async fn from_file(file: impl AsRef<Path>) -> Result<Self> {
+        let file = file.as_ref().to_owned();
+
+        // serde_json does not support asynchronous readers, so we make sure to spawn the task away
+        // from the main thread.
+        tokio::task::spawn_blocking(|| {
+            serde_json::from_reader(
+                std::fs::File::open(file)
+                    .context("Failed to open state file")
+                    .into_unrecoverable()?,
+            )
+            .context("Failed to deserialize state file")
+            .into_unrecoverable()
+        })
+        .await
+        .expect("Failed to await synchronous read of state file")
+    }
+
     async fn write_to_file(&self, file: impl AsRef<Path>) -> Result<()> {
         let file = file.as_ref().to_owned();
 
@@ -110,6 +128,8 @@ enum Cli {
     Upload(Upload),
     /// Resume the upload of a file to S3.
     Resume(Resume),
+    /// Abort the upload of a file to S3.
+    Abort(Abort),
 }
 
 #[derive(Debug, Args)]
@@ -258,23 +278,7 @@ impl Resume {
     async fn run(&self) -> Result<()> {
         debug!("Running resume command: {:?}", self);
 
-        // Serde does not support asynchronous readers, so we make sure to spawn the task away from
-        // the main thread.
-        let state: State = tokio::task::spawn_blocking({
-            let state_file = self.state_file.clone();
-            || {
-                serde_json::from_reader(
-                    std::fs::File::open(state_file)
-                        .context("Failed to open state file")
-                        .into_unrecoverable()?,
-                )
-                .context("Failed to deserialize state file")
-                .into_unrecoverable()
-            }
-        })
-        .await
-        .expect("Failed to await synchronous read of state file")?;
-
+        let state = State::from_file(&self.state_file).await?;
         let current_file_size_in_bytes = {
             let file = tokio::fs::File::open(&state.file_to_upload)
                 .await
@@ -310,6 +314,48 @@ impl Resume {
             }
             result => result,
         }?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+struct Abort {
+    /// Path to where the state-file of a previous upload.
+    ///
+    /// This state-file is used to abort the upload in question. The state-file will automatically
+    /// be removed after the upload has been aborted.
+    #[arg(long)]
+    state_file: PathBuf,
+}
+
+impl Abort {
+    async fn run(&self) -> Result<()> {
+        debug!("Running abort command: {:?}", self);
+
+        let state = State::from_file(&self.state_file).await?;
+        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let s3 = aws_sdk_s3::Client::new(&config);
+
+        s3.abort_multipart_upload()
+            .bucket(&state.s3_bucket)
+            .key(&state.s3_key)
+            .upload_id(&state.upload_id)
+            .send()
+            .await
+            .into_retryable()?;
+        info!(
+            "Aborted multipart upload with ID {} for: s3://{}/{}",
+            state.upload_id, state.s3_bucket, state.s3_key,
+        );
+
+        debug!("Removing state-file: {}", self.state_file.display());
+        match tokio::fs::remove_file(&self.state_file).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                debug!("The state-file did not exist, probably because it was never written, likely because the upload worked first try.")
+            }
+            result => result.into_unrecoverable()?,
+        }
+
         Ok(())
     }
 }
@@ -502,5 +548,6 @@ async fn main() -> Result<()> {
     match command {
         Cli::Upload(cmd) => cmd.run().await,
         Cli::Resume(cmd) => cmd.run().await,
+        Cli::Abort(cmd) => cmd.run().await,
     }
 }
