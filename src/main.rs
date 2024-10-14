@@ -128,10 +128,46 @@ impl State {
 #[command(version)]
 enum Cli {
     /// Upload a file to S3.
+    ///
+    /// Persevere will take care of uploading the file in a manner that is resilient, such that
+    /// intermittent errors do not result in losing all progress on the upload, as well as
+    /// resumable, e.g. in case the system you are uploading crashed or there is a more persistent,
+    /// but still recoverable, error.
+    ///
+    /// This is achieved through a state-file which keeps track of the state of the upload. Resuming
+    /// an upload is done through the `resume` subcommand, by providing the same state-file again.
+    ///
+    /// You need the following AWS permissions for the S3-object ARN you are trying to upload to:
+    ///
+    /// * `s3:PutObject`
+    /// * `s3:AbortMultipartUpload`
     Upload(Upload),
     /// Resume the upload of a file to S3.
+    ///
+    /// You only have to provide the state-file of a previous invocation to `upload`, and Persevere
+    /// will resume your upload where it left off.
+    ///
+    /// You can not provide any other parameters to modify how the upload is handled, all choices
+    /// made when you started the upload have to remain the same. If you modify the state-file
+    /// manually, chances are you'll either have the upload fail outright, or you'll end up with a
+    /// corrupt object in S3 (and won't know that it is corrupt).
+    ///
+    /// You need the following AWS permissions for the S3-object ARN you are trying to upload to:
+    ///
+    /// * `s3:PutObject`
+    /// * `s3:AbortMultipartUpload`
     Resume(Resume),
     /// Abort the upload of a file to S3.
+    ///
+    /// If you previously started an upload using the `upload` subcommand which has failed with a
+    /// recoverable error, but you no longer want to finish the upload you can invoke this
+    /// subcommand with the state-file. The multipart-upload with AWS will then be aborted (which
+    /// ensures the partial upload no longer creates any cost) and the state-file will be removed.
+    ///
+    /// You need the following AWS permissions for the S3-object ARN you are trying to upload to:
+    ///
+    /// * `s3:PutObject`
+    /// * `s3:AbortMultipartUpload`
     Abort(Abort),
 }
 
@@ -143,16 +179,30 @@ struct Upload {
     /// The S3 key where to upload the file to.
     #[arg(long)]
     s3_key: String,
-    /// Path to the file to upload.
+    /// Path to the local file to upload to S3.
     #[arg(long)]
     file_to_upload: PathBuf,
-    /// Explicit part-size to use.
+    /// Explicit part-size, in bytes, to use.
+    ///
+    /// If not provided, Persevere will choose the smallest part-size possible by default, which is
+    /// either 5 MB (the minimum S3 requires) or the smallest each part can be to allow the file to
+    /// be uploaded within 10,000 parts (the maximum S3 allows).
+    ///
+    /// Smaller part-sizes make you lose less progress in case something fails, but it usually also
+    /// means that you might not achieve as much throughput as your network would allow. In cases
+    /// where you want to optimize for throughput, and don't care too much about losing progress
+    /// within an individual part, you can increase the part-size.
+    ///
+    /// The maximum part-size S3 supports is 5 GB. Persevere will inform you if the part-size you
+    /// have chosen is too small for either the file you are trying to upload, or smaller than AWS's
+    /// limit. It will also inform you if you have chosen a part-size that is too large and not
+    /// supported by S3.
     #[arg(long)]
     override_part_size: Option<u64>,
     /// Path to where the state-file will be saved.
     ///
-    /// The state-file is used to make resumable uploads possible. This file is only written if the
-    /// upload has failed.
+    /// The state-file is used to make resumable uploads possible. It will automatically be removed
+    /// if the upload finishes successfully.
     #[arg(long)]
     state_file: PathBuf,
 }
