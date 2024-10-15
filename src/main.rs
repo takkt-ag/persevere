@@ -134,7 +134,7 @@ impl State {
 ///
 /// Source: <https://github.com/takkt-ag/persevere>
 #[derive(Debug, Parser)]
-#[command(version)]
+#[command(version, max_term_width = 100)]
 enum Cli {
     /// Upload a file to S3.
     ///
