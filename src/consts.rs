@@ -42,16 +42,14 @@ pub(crate) const MINIMUM_PART_NUMBER: u64 = 1;
 /// Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
 pub(crate) const MAXIMUM_PART_NUMBER: u64 = 10_000;
 
-/// Part size: 5 MiB to 5 GiB.
+/// Minimum part size: 5 MiB
 ///
 /// There is no minimum size limit on the last part of your multipart upload.
 ///
 /// Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
 pub(crate) const MINIMUM_PART_SIZE: u64 = 5 * MiB;
 
-/// Part size: 5 MiB to 5 GiB.
-///
-/// There is no minimum size limit on the last part of your multipart upload.
+/// Maximum part size: 5 GiB
 ///
 /// Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
 pub(crate) const MAXIMUM_PART_SIZE: u64 = 5 * GiB;

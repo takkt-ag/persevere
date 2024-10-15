@@ -124,6 +124,15 @@ impl State {
     }
 }
 
+/// With Persevere you can upload huge files to S3 without worrying about network interruptions or
+/// other issues. Persevere will allow you to resume the upload where it was left off, even in the
+/// case of a system crash during upload.
+///
+/// The contents of the file you upload are always streamed, which means the memory usage of
+/// Persevere is minimal, usually below 10 MB. This makes it possible to upload files of any size
+/// supported by S3, even if they are larger than the available memory of your system.
+///
+/// Source: <https://github.com/takkt-ag/persevere>
 #[derive(Debug, Parser)]
 #[command(version)]
 enum Cli {
@@ -141,6 +150,11 @@ enum Cli {
     ///
     /// * `s3:PutObject`
     /// * `s3:AbortMultipartUpload`
+    ///
+    /// Persevere will automatically discover valid AWS credentials like most AWS SDKs. This means
+    /// you can provide environment variables such as `AWS_PROFILE` to select the profile you want
+    /// to upload a file with, or provide the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+    /// directly.
     Upload(Upload),
     /// Resume the upload of a file to S3.
     ///
@@ -156,6 +170,11 @@ enum Cli {
     ///
     /// * `s3:PutObject`
     /// * `s3:AbortMultipartUpload`
+    ///
+    /// Persevere will automatically discover valid AWS credentials like most AWS SDKs. This means
+    /// you can provide environment variables such as `AWS_PROFILE` to select the profile you want
+    /// to upload a file with, or provide the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+    /// directly.
     Resume(Resume),
     /// Abort the upload of a file to S3.
     ///
@@ -168,6 +187,11 @@ enum Cli {
     ///
     /// * `s3:PutObject`
     /// * `s3:AbortMultipartUpload`
+    ///
+    /// Persevere will automatically discover valid AWS credentials like most AWS SDKs. This means
+    /// you can provide environment variables such as `AWS_PROFILE` to select the profile you want
+    /// to upload a file with, or provide the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+    /// directly.
     Abort(Abort),
 }
 
