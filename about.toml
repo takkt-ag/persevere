@@ -1,0 +1,16 @@
+accepted = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+]
+workarounds = ["ring"]
+
+[ring]
+accepted = ["OpenSSL"]
+
+[unicode-ident]
+accepted = ["Unicode-DFS-2016"]
+
+[foldhash]
+accepted = ["Zlib"]
