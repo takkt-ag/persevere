@@ -153,7 +153,7 @@ If you are interested in contributing a feature that is not mentioned here, we s
 Persevere is licensed under the Apache License, Version 2.0, (see [LICENSE](LICENSE) or <https://www.apache.org/licenses/LICENSE-2.0>).
 
 Persevere internally makes use of various open-source projects.
-You can find a full list of these projects and their licenses in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+You can find a full list of these projects and their licenses in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ### Contribution
 
