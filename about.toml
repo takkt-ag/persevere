@@ -5,6 +5,7 @@ accepted = [
     "MIT",
 ]
 workarounds = ["ring"]
+no-clearly-defined = true
 
 [ring]
 accepted = ["OpenSSL"]
