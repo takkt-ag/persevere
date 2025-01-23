@@ -11,9 +11,6 @@ no-clearly-defined = true
 [ring]
 accepted = ["OpenSSL"]
 
-[unicode-ident]
-accepted = ["Unicode-DFS-2016"]
-
 [foldhash]
 accepted = ["Zlib"]
 

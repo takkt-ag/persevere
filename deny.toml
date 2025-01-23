@@ -13,9 +13,6 @@ exceptions = [
     # https://tldrlegal.com/license/openssl-license-(openssl)
     { allow = ["ISC", "MIT", "OpenSSL"], name = "ring" },
 
-    # Unicode-DFS-2016 is a permissive license, if attribution in associated documentation is provided
-    { allow = ["Unicode-DFS-2016"], crate = "unicode-ident" },
-
     # Zlib is a permissive license akin to MIT
     { allow = ["Zlib"], crate = "foldhash"},
 
