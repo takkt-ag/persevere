@@ -3,6 +3,7 @@ accepted = [
     "BSD-3-Clause",
     "ISC",
     "MIT",
+    "Unicode-3.0",
 ]
 workarounds = ["ring"]
 no-clearly-defined = true
@@ -15,3 +16,6 @@ accepted = ["Unicode-DFS-2016"]
 
 [foldhash]
 accepted = ["Zlib"]
+
+[cbindgen]
+accepted = ["MPL-2.0"]
