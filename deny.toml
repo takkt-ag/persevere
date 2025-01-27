@@ -5,6 +5,7 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "MIT",
+    "Unicode-3.0",
 ]
 
 exceptions = [
@@ -12,11 +13,15 @@ exceptions = [
     # https://tldrlegal.com/license/openssl-license-(openssl)
     { allow = ["ISC", "MIT", "OpenSSL"], name = "ring" },
 
-    # Unicode-DFS-2016 is a permissive license, if attribution in associated documentation is provided
-    { allow = ["Unicode-DFS-2016"], crate = "unicode-ident" },
-
     # Zlib is a permissive license akin to MIT
     { allow = ["Zlib"], crate = "foldhash"},
+
+    # MPL-2.0 is a copyleft license, but we can still fulfill its requirements if:
+    # - We include a copyright notice (which we do through `THIRD_PARTY_LICENSES.md`)
+    # - We include the full license (which we do through `THIRD_PARTY_LICENSES.md`)
+    # - We disclose source-code (which we do, since this tool is open-source)
+    # - We include instructions to obtain the source (which we do through `THIRD_PARTY_LICENSES.md`)
+    { allow = ["MPL-2.0"], crate = "cbindgen"},
 ]
 
 [[licenses.clarify]]
