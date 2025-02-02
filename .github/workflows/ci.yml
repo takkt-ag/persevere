@@ -41,7 +41,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Install cargo-about
-      uses: taiki-e/install-action@v2.44.50
+      uses: taiki-e/install-action@v2.48.1
       with:
         tool: cargo-about
     - name: Generate up-to-date `THIRD_PARTY_LICENSES.md`
