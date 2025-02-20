@@ -45,7 +45,7 @@ Assume you have a very large file called `database.dump` that you want to upload
 You can use Persevere as such to upload this file:
 
 ```sh
-persevere upload --s3-bucket my-bucket --s3-key backups/database.dump --file-to-upload database.dump --state-file database.dump.persevere-state
+persevere upload start --s3-bucket my-bucket --s3-key backups/database.dump --file-to-upload database.dump --state-file database.dump.persevere-state
 ```
 
 The actual name of the state-file does not matter, just make it something that makes sense to you!
@@ -54,13 +54,13 @@ Once you execute the command, the upload will start immediately, showing you the
 If the upload is interrupted for any reason, you can resume it by running the `resume` command, providing the same state-file again:
 
 ```sh
-persevere resume --state-file database.dump.persevere-state
+persevere upload resume --state-file database.dump.persevere-state
 ```
 
 Should you, for any reason, want to abort the upload before it has finished, you can do so by running the `abort` command, again providing the same state-file:
 
 ```sh
-persevere abort --state-file database.dump.persevere-state
+persevere upload abort --state-file database.dump.persevere-state
 ```
 
 To see all available commands, run:
