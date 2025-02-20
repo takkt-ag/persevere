@@ -17,6 +17,7 @@
 mod compat;
 mod consts;
 mod de;
+mod download;
 mod result;
 mod upload;
 
@@ -34,9 +35,9 @@ pub(crate) async fn get_aws_config() -> aws_config::SdkConfig {
         .build()
 }
 
-/// With Persevere you can upload huge files to S3 without worrying about network interruptions or
-/// other issues. Persevere will allow you to resume the upload where it was left off, even in the
-/// case of a system crash during upload.
+/// With Persevere you can upload and download huge files to and from S3 without worrying about
+/// network interruptions or other issues. Persevere will allow you to resume the upload or download
+/// where it was left off, even in the case of a system crash.
 ///
 /// Source: <https://github.com/takkt-ag/persevere>
 #[derive(Debug, Parser)]
@@ -49,6 +50,12 @@ enum Cli {
     /// supported by S3, even if they are larger than the available memory of your system.
     #[command(subcommand)]
     Upload(upload::Upload),
+    /// Download a file from S3.
+    ///
+    /// The local file will be made the full size required immediately, to make sure you have enough
+    /// disk-space for the full download.
+    #[command(subcommand)]
+    Download(download::Download),
 }
 
 #[tokio::main]
@@ -72,5 +79,6 @@ async fn main() -> Result<()> {
     let command = Cli::parse();
     match command {
         Cli::Upload(cmd) => cmd.run().await,
+        Cli::Download(download) => download.run().await,
     }
 }
