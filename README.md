@@ -1,14 +1,14 @@
-# Persevere &ndash; a tool for reliably uploading huge files to S3
+# Persevere &ndash; a tool for reliably uploading and downloading huge files to and from S3
 
-With Persevere you can upload huge files to S3 without worrying about network interruptions or other issues.
-Persevere will allow you to resume the upload where it was left off, even in the case of a system crash during upload.
+With Persevere you can upload and download huge files to and from S3 without worrying about network interruptions or other issues.
+Persevere will allow you to resume the upload or download where it was left off, even in the case of a system crash.
 
 The contents of the file you upload are always streamed, which means the memory usage of Persevere is minimal, usually below 10 MB.
 This makes it possible to upload files of any size supported by S3, even if they are larger than the available memory of your system.
 
 > [!IMPORTANT]
 > This project is still in fairly early development.
-> Although we have used it to upload files up to 3 TB in size reliably, there is a chance that there are bugs that could lead to corrupt objects in S3.
+> Although we have used it to upload and download files up to 3 TB in size reliably, there is a chance that there are bugs that could lead to corrupt objects in S3.
 > 
 > For files where it is vital to you that the object that ends up in S3 is valid, consider one of these options:
 >
@@ -39,6 +39,21 @@ This will create the binary in:
 ## Usage
 
 Persevere is a command-line tool, so interactions with it happen from a terminal.
+
+To see all available commands, run:
+
+```sh
+persevere --help
+```
+
+If you want to see the help for a specific command, run:
+
+```sh
+persevere <command> --help
+```
+
+### Uploading files
+
 A normal workflow of using Persevere means invoking the `upload` command for the file you want to upload.
 
 Assume you have a very large file called `database.dump` that you want to upload to the S3 bucket `my-bucket` under the key `backups/database.dump`.
@@ -63,31 +78,43 @@ Should you, for any reason, want to abort the upload before it has finished, you
 persevere upload abort --state-file database.dump.persevere-state
 ```
 
-To see all available commands, run:
+### Downloading files
+
+Similar to uploading files, you can also download files from S3 with Persevere.
+
+Assume you want to download the file we uploaded in the previous example, you can do so with:
 
 ```sh
-persevere --help
+persevere download start --s3-bucket my-bucket --s3-key backups/database.dump --output database.dump --state-file database.dump.persevere-state
 ```
 
-If you want to see the help for a specific command, run:
+If the download is interrupted, you can resume it with:
 
 ```sh
-persevere <command> --help
+persevere download resume --state-file database.dump.persevere-state
+```
+
+And if you want to abort the download, you can do so with:
+
+```sh
+persevere download abort --state-file database.dump.persevere-state
 ```
 
 ## AWS credentials and permissions
 
-An upload to S3 obviously requires some credentials and permissions to work.
+Uploads to and downloads from S3 require some credentials and permissions to work.
 
 Persevere will automatically discover valid AWS credentials like most AWS SDKs.
-This means you can provide environment variables such as `AWS_PROFILE` to select the profile you want to upload a file with, or provide the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` directly.
+This means you can provide environment variables such as `AWS_PROFILE` to select the profile you want to upload or download a file with, or provide the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` directly.
 
 If you are running Persevere on an AWS resource that has an AWS role attached (like the instance profile of an EC2 instance, or the task-role of an ECS task), Persevere will automatically use the credentials of that role.
 
-Regardless of how the credentials are provided, the user or role must have the necessary permissions to upload to the S3 bucket and key you specify.
-Only the `s3:PutObject` and `s3:AbortMultipartUpload` actions need to be allowed.
+Regardless of how the credentials are provided, the user or role must have the necessary permissions to upload to or download from the S3 bucket and key you specify.
 
-A valid IAM policy can look like this:
+For uploads, only the `s3:PutObject` and `s3:AbortMultipartUpload` actions need to be allowed.
+For downloads, only the `s3:GetObject` action needs to be allowed.
+
+A valid IAM policy for uploads can look like this:
 
 ```json
 {
@@ -135,16 +162,16 @@ You might want to look at other tools, such as:
 
 ## Planned features
 
-Persevere is not intended to become a full-featured S3 client: it is meant to be a tool that allows you to upload huge files to S3, **reliably**.
+Persevere is not intended to become a full-featured S3 client: it is meant to be a tool that allows you to upload and download huge files to and from S3, **reliably**.
 
 Still, there are some features that we believe are necessary to make Persevere a complete tool for this purpose:
 
 * Automatic checksum calculation on upload.
-* Per-part checksums.
+* Per-part checksums on upload.
 
 Additionally, we think there might be features that could be useful to many users, enhancing the applicability of Persevere, without bloating it:
 
-* Uploading multiple parts in parallel to speed up uploads.
+* Uploading or downloading multiple parts in parallel to speed up uploads and downloads.
 
 If you are interested in contributing a feature that is not mentioned here, we suggest to reach out through an issue first to see if the feature is something we would like to see in Persevere.
 
