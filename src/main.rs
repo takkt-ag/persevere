@@ -40,6 +40,7 @@ use crate::{
 use anyhow::Context;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
+    config::RequestChecksumCalculation,
     primitives::ByteStream,
     types::{
         CompletedMultipartUpload,
@@ -69,6 +70,14 @@ use tracing::{
     warn,
 };
 use tracing_subscriber::prelude::*;
+
+async fn get_aws_config() -> aws_config::SdkConfig {
+    aws_config::load_defaults(BehaviorVersion::v2025_01_17())
+        .await
+        .into_builder()
+        .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+        .build()
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct State {
@@ -289,7 +298,7 @@ impl Upload {
             part_size
         };
 
-        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let config = get_aws_config().await;
         let s3 = aws_sdk_s3::Client::new(&config);
 
         let multipart_upload = s3
@@ -371,7 +380,7 @@ impl Resume {
             );
         }
 
-        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let config = get_aws_config().await;
         let s3 = aws_sdk_s3::Client::new(&config);
 
         match upload(&s3, &self.state_file, &mut state).await {
@@ -410,7 +419,7 @@ impl Abort {
         debug!("Running abort command: {:?}", self);
 
         let state = State::from_file(&self.state_file).await?;
-        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        let config = get_aws_config().await;
         let s3 = aws_sdk_s3::Client::new(&config);
 
         s3.abort_multipart_upload()
