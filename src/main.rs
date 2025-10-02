@@ -72,7 +72,7 @@ use tracing::{
 use tracing_subscriber::prelude::*;
 
 async fn get_aws_config() -> aws_config::SdkConfig {
-    aws_config::load_defaults(BehaviorVersion::v2025_01_17())
+    aws_config::load_defaults(BehaviorVersion::v2025_08_07())
         .await
         .into_builder()
         .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
